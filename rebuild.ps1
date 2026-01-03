@@ -1,5 +1,5 @@
 Write-Host "Discord Audio Guard - Build" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "" 
 
 # Kill processes
 Get-Process -Name "DiscordStreamEchoFix", "dotnet" -ErrorAction SilentlyContinue | 
