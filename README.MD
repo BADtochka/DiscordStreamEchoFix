@@ -3,7 +3,7 @@
 Fixes Discord Go Live echo caused when Discord injects audio into all devices. This only occurs when streaming your entire screen, not when streaming a specific application.
 
 ## ⚡ Quick Fix
-1. [Download from releases]()
+1. [Download from releases](https://github.com/BADtochka/DiscordStreamEchoFix/releases/latest/download/DiscordStreamEchoFix.exe)
 2. **Run** the app → appears in system tray
 3. **Settings** → Right-click tray icon
 4. **Uncheck** physical devices (speakers/headphones)

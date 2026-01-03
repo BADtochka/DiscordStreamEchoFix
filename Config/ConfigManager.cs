@@ -8,8 +8,11 @@ namespace DiscordStreamEchoFix.Config
 {
     public static class ConfigManager
     {
-        private static readonly string ConfigPath =
-            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+        private static readonly string ConfigPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "DiscordStreamEchoFix",
+            "appsettings.json"
+        );
         private static RootConfig _config = null!;
 
         static ConfigManager()
@@ -74,8 +77,9 @@ namespace DiscordStreamEchoFix.Config
                         foreach (var deviceName in oldConfig.AppConfig.IgnoredDevices)
                         {
                             // Find or create device config
-                            var device = _config.AppConfig.Devices
-                                .FirstOrDefault(d => d.FriendlyName == deviceName);
+                            var device = _config.AppConfig.Devices.FirstOrDefault(d =>
+                                d.FriendlyName == deviceName
+                            );
 
                             if (device != null)
                             {
@@ -99,23 +103,29 @@ namespace DiscordStreamEchoFix.Config
             {
                 using (var enumerator = new MMDeviceEnumerator())
                 {
-                    var systemDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All);
+                    var systemDevices = enumerator.EnumerateAudioEndPoints(
+                        DataFlow.Render,
+                        DeviceState.All
+                    );
 
                     // For each system device
                     foreach (var systemDevice in systemDevices)
                     {
-                        var existingDevice = _config.AppConfig.Devices
-                            .FirstOrDefault(d => d.Id == systemDevice.ID);
+                        var existingDevice = _config.AppConfig.Devices.FirstOrDefault(d =>
+                            d.Id == systemDevice.ID
+                        );
 
                         if (existingDevice == null)
                         {
                             // Add new device
-                            _config.AppConfig.Devices.Add(new DeviceConfig
-                            {
-                                Id = systemDevice.ID,
-                                FriendlyName = systemDevice.FriendlyName,
-                                Ignored = false
-                            });
+                            _config.AppConfig.Devices.Add(
+                                new DeviceConfig
+                                {
+                                    Id = systemDevice.ID,
+                                    FriendlyName = systemDevice.FriendlyName,
+                                    Ignored = false,
+                                }
+                            );
                         }
                         else
                         {
@@ -142,7 +152,7 @@ namespace DiscordStreamEchoFix.Config
                 var options = new JsonSerializerOptions
                 {
                     WriteIndented = true,
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
                 };
 
                 string json = JsonSerializer.Serialize(_config, options);
