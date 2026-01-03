@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  semantic-release:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: windows-latest
     permissions:
       contents: write
     
@@ -18,159 +18,103 @@ jobs:
         fetch-depth: 0
         fetch-tags: true
     
-    - name: Get last tag
-      id: get_last_tag
+    - name: Analyze commits and calculate version
+      id: version
+      shell: pwsh
       run: |
-        # Get the latest semantic version tag
-        LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
-        if [ -z "$LAST_TAG" ]; then
-          LAST_TAG="v0.0.0"
-        fi
-        echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
-        echo "Last tag: $LAST_TAG"
-    
-    - name: Analyze commits since last tag
-      id: analyze_commits
-      run: |
-        LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
-        echo "Analyzing commits since: $LAST_TAG"
+        # Get last semantic version tag
+        $LAST_TAG = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | Select-Object -First 1
+        if (-not $LAST_TAG) { $LAST_TAG = "v0.0.0" }
+        Write-Host "Last tag: $LAST_TAG"
         
-        # Get commit messages since last tag
-        if [ "$LAST_TAG" = "v0.0.0" ]; then
-          COMMITS=$(git log --oneline --format=%s)
-        else
-          COMMITS=$(git log "$LAST_TAG..HEAD" --oneline --format=%s)
-        fi
-        
-        echo "Found $(echo "$COMMITS" | wc -l) commits since last tag"
+        # Get commits since last tag
+        $COMMITS = if ($LAST_TAG -eq "v0.0.0") {
+          git log --oneline --format=%s
+        } else {
+          git log "$LAST_TAG..HEAD" --oneline --format=%s
+        }
         
         # Count commit types
-        MAJOR_COUNT=$(echo "$COMMITS" | grep -E -i "BREAKING CHANGE|^.*!:" | wc -l)
-        FEAT_COUNT=$(echo "$COMMITS" | grep -E -i "^feat|^feature" | wc -l)
-        FIX_COUNT=$(echo "$COMMITS" | grep -E -i "^fix|^bug" | wc -l)
+        $MAJOR = ($COMMITS | Select-String -Pattern "BREAKING CHANGE|^.*!:" -CaseSensitive:$false).Count
+        $FEAT = ($COMMITS | Select-String -Pattern "^feat|^feature" -CaseSensitive:$false).Count
+        $FIX = ($COMMITS | Select-String -Pattern "^fix|^bug" -CaseSensitive:$false).Count
         
-        echo "Major changes: $MAJOR_COUNT"
-        echo "Features: $FEAT_COUNT"
-        echo "Fixes: $FIX_COUNT"
+        Write-Host "Breaking: $MAJOR, Features: $FEAT, Fixes: $FIX"
         
-        # Determine bump type
-        if [ $MAJOR_COUNT -gt 0 ]; then
-          BUMP="major"
-        elif [ $FEAT_COUNT -gt 0 ]; then
-          BUMP="minor"
-        elif [ $FIX_COUNT -gt 0 ]; then
-          BUMP="patch"
-        else
-          BUMP="none"
-        fi
+        # Determine version bump
+        $BUMP = if ($MAJOR -gt 0) { "major" } 
+                elseif ($FEAT -gt 0) { "minor" } 
+                elseif ($FIX -gt 0) { "patch" } 
+                else { "none" }
         
-        echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
-        echo "Version bump needed: $BUMP"
-
-  build:
-    runs-on: windows-latest
-    needs: semantic-release
-    if: needs.semantic-release.outputs.bump_type != 'none'
-    permissions:
-      contents: write
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Get project name
-      id: project_name
-      run: |
-        $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
-        $PROJECT_NAME = [System.IO.Path]::GetFileNameWithoutExtension($PROJECT.Name)
-        echo "project_name=$PROJECT_NAME" >> $env:GITHUB_OUTPUT
-        Write-Host "Project name: $PROJECT_NAME"
-    
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '10.0.x'
-    
-    - name: Calculate new version
-      id: calc_version
-      run: |
-        $LAST_TAG = "${{ needs.semantic-release.outputs.last_tag }}"
-        $BUMP = "${{ needs.semantic-release.outputs.bump_type }}"
-        
-        Write-Host "Last tag: $LAST_TAG"
-        Write-Host "Bump type: $BUMP"
-        
-        # Extract version numbers
-        $VERSION_NUMBERS = $LAST_TAG -replace '^v', ''
-        $PARTS = $VERSION_NUMBERS -split '\.'
-        
-        # Convert to integers
-        $MAJOR = [int]$PARTS[0]
-        $MINOR = [int]$PARTS[1]
-        $PATCH = [int]$PARTS[2]
-        
-        # Apply bump
-        switch ($BUMP) {
-          "major" { 
-            $MAJOR++
-            $MINOR = 0
-            $PATCH = 0
-          }
-          "minor" { 
-            $MINOR++
-            $PATCH = 0
-          }
-          "patch" { 
-            $PATCH++
-          }
+        if ($BUMP -eq "none") {
+          Write-Host "No version bump needed"
+          echo "should_release=false" >> $env:GITHUB_OUTPUT
+          exit 0
         }
         
-        $NEW_VERSION = "$MAJOR.$MINOR.$PATCH"
+        # Calculate new version
+        $VERSION = $LAST_TAG -replace '^v', ''
+        $PARTS = $VERSION -split '\.'
+        $MAJ = [int]$PARTS[0]
+        $MIN = [int]$PARTS[1]
+        $PAT = [int]$PARTS[2]
+        
+        switch ($BUMP) {
+          "major" { $MAJ++; $MIN = 0; $PAT = 0 }
+          "minor" { $MIN++; $PAT = 0 }
+          "patch" { $PAT++ }
+        }
+        
+        $NEW_VERSION = "$MAJ.$MIN.$PAT"
         $TAG = "v$NEW_VERSION"
         
-        Write-Host "New version: $NEW_VERSION"
-        Write-Host "New tag: $TAG"
+        Write-Host "New version: $TAG"
         
-        # Set outputs
-        echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
+        echo "should_release=true" >> $env:GITHUB_OUTPUT
+        echo "version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
         echo "tag=$TAG" >> $env:GITHUB_OUTPUT
+        echo "major_count=$MAJOR" >> $env:GITHUB_OUTPUT
+        echo "feat_count=$FEAT" >> $env:GITHUB_OUTPUT
+        echo "fix_count=$FIX" >> $env:GITHUB_OUTPUT
     
-    - name: Check if tag already exists
-      id: check_tag
+    - name: Get project name
+      if: steps.version.outputs.should_release == 'true'
+      id: project
+      shell: pwsh
       run: |
-        $TAG = "${{ steps.calc_version.outputs.tag }}"
-        Write-Host "Checking if tag exists: $TAG"
+        $PROJECT = (Get-ChildItem -Filter "*.csproj" | Select-Object -First 1).BaseName
+        echo "name=$PROJECT" >> $env:GITHUB_OUTPUT
+        Write-Host "Project: $PROJECT"
+    
+    - name: Setup .NET
+      if: steps.version.outputs.should_release == 'true'
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+    
+    - name: Update project version
+      if: steps.version.outputs.should_release == 'true'
+      shell: pwsh
+      run: |
+        $CSPROJ = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
+        $VERSION = "${{ steps.version.outputs.version }}"
         
-        # Check local tags
-        $LOCAL_TAG = git tag -l $TAG
-        if ($LOCAL_TAG) {
-          Write-Host "Tag $TAG already exists locally"
-          echo "tag_exists=true" >> $env:GITHUB_OUTPUT
-        } else {
-          Write-Host "Tag $TAG does not exist locally"
-          echo "tag_exists=false" >> $env:GITHUB_OUTPUT
+        $XML = [xml](Get-Content $CSPROJ.FullName)
+        $PropertyGroup = $XML.Project.PropertyGroup | Select-Object -First 1
+        
+        if (-not $PropertyGroup.Version) {
+          $PropertyGroup.AppendChild($XML.CreateElement("Version")) | Out-Null
         }
-    
-    - name: Update version in csproj
-      if: steps.check_tag.outputs.tag_exists == 'false'
-      run: |
-        $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
-        $VERSION = "${{ steps.calc_version.outputs.new_version }}"
+        $PropertyGroup.Version = $VERSION
         
-        Write-Host "Updating $($PROJECT.Name) to version $VERSION"
-        
-        $CONTENT = Get-Content $PROJECT.FullName -Raw
-        $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
-        $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION</AssemblyVersion>"
-        $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION</FileVersion>"
-        
-        Set-Content -Path $PROJECT.FullName -Value $CONTENT -Encoding UTF8
+        $XML.Save($CSPROJ.FullName)
+        Write-Host "Updated version to $VERSION"
     
     - name: Build and publish
-      if: steps.check_tag.outputs.tag_exists == 'false'
+      if: steps.version.outputs.should_release == 'true'
+      shell: pwsh
       run: |
-        dotnet build -c Release
-        
         dotnet publish -c Release `
           -r win-x64 `
           --self-contained false `
@@ -179,60 +123,45 @@ jobs:
           -p:DebugSymbols=false `
           -o ./publish
         
-        $EXE_NAME = "${{ steps.project_name.outputs.project_name }}.exe"
-        $EXE_PATH = "./publish/$EXE_NAME"
-        if (Test-Path $EXE_PATH) {
-          Write-Host "✅ Executable created: $EXE_NAME"
-        } else {
-          Write-Error "❌ Executable not found"
+        $EXE = "./publish/${{ steps.project.outputs.name }}.exe"
+        if (-not (Test-Path $EXE)) {
+          Write-Error "Executable not found: $EXE"
           exit 1
         }
+        Write-Host "✅ Build successful"
     
-    - name: Create and push Git tag
-      if: steps.check_tag.outputs.tag_exists == 'false'
+    - name: Create tag and release
+      if: steps.version.outputs.should_release == 'true'
+      shell: pwsh
       run: |
-        $TAG = "${{ steps.calc_version.outputs.tag }}"
+        $TAG = "${{ steps.version.outputs.tag }}"
         
-        Write-Host "Creating tag: $TAG"
-        
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
+        git config user.email "action@github.com"
+        git config user.name "GitHub Action"
         git tag -a $TAG -m "Release $TAG"
         git push origin $TAG
         
-        Write-Host "✅ Tag $TAG created and pushed"
-    
-    - name: Skip existing tag
-      if: steps.check_tag.outputs.tag_exists == 'true'
-      run: |
-        $TAG = "${{ steps.calc_version.outputs.tag }}"
-        Write-Host "⚠️  Tag $TAG already exists. Skipping release creation."
-        Write-Host "This usually means the commits don't require a new version bump."
+        Write-Host "✅ Tag $TAG created"
     
     - name: Create GitHub Release
-      if: steps.check_tag.outputs.tag_exists == 'false'
-      uses: softprops/action-gh-release@v1
+      if: steps.version.outputs.should_release == 'true'
+      uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.calc_version.outputs.tag }}
-        name: Release ${{ steps.calc_version.outputs.tag }}
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: Release ${{ steps.version.outputs.tag }}
         body: |
-          # Discord Audio Guard ${{ steps.calc_version.outputs.new_version }}
+          # ${{ steps.project.outputs.name }} ${{ steps.version.outputs.version }}
           
           Automated semantic release.
           
-          ## What's New
-          - **Breaking changes**: ${{ needs.semantic-release.outputs.major_count || 0 }}
-          - **Features**: ${{ needs.semantic-release.outputs.feat_count || 0 }}
-          - **Fixes**: ${{ needs.semantic-release.outputs.fix_count || 0 }}
+          ## Changes
+          - 💥 Breaking: ${{ steps.version.outputs.major_count }}
+          - ✨ Features: ${{ steps.version.outputs.feat_count }}
+          - 🐛 Fixes: ${{ steps.version.outputs.fix_count }}
           
           ## Installation
-          1. Download `${{ steps.project_name.outputs.project_name }}.exe`
-          2. Run the executable
-          3. Configure audio devices in system tray settings
-          
-          *Fixes Discord Go Live echo when streaming entire screen.*
+          Download and run `${{ steps.project.outputs.name }}.exe`
         draft: false
-        files: |
-          ./publish/${{ steps.project_name.outputs.project_name }}.exe
+        files: ./publish/${{ steps.project.outputs.name }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
