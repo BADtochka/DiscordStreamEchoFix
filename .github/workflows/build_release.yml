@@ -9,7 +9,7 @@ jobs:
   semantic-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # This is required for releases
     
     steps:
     - name: Checkout
@@ -17,18 +17,6 @@ jobs:
       with:
         fetch-depth: 0
         fetch-tags: true
-    
-    - name: Find project file
-      id: find_project
-      run: |
-        # Find .csproj file in repository
-        PROJECT_FILE=$(find . -name "*.csproj" -type f | head -1)
-        if [ -z "$PROJECT_FILE" ]; then
-          echo "No .csproj file found!"
-          exit 1
-        fi
-        echo "project_file=$PROJECT_FILE" >> $GITHUB_OUTPUT
-        echo "Found project file: $PROJECT_FILE"
     
     - name: Get last tag
       id: get_last_tag
@@ -49,8 +37,8 @@ jobs:
         fi
         
         MAJOR_COUNT=$(echo "$COMMITS" | grep -i "BREAKING CHANGE\|!" | wc -l)
-        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature\|^feat(\|^feat:" | wc -l)
-        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix\|^fix(\|^fix:" | wc -l)
+        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature" | wc -l)
+        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix" | wc -l)
         
         if [ $MAJOR_COUNT -gt 0 ]; then
           BUMP="major"
@@ -63,29 +51,18 @@ jobs:
         fi
         
         echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
-        echo "new_version_calc=$MAJOR_COUNT.$FEAT_COUNT.$FIX_COUNT" >> $GITHUB_OUTPUT
+        echo "Detected $MAJOR_COUNT breaking, $FEAT_COUNT features, $FIX_COUNT fixes"
 
   build:
     runs-on: windows-latest
     needs: semantic-release
     if: needs.semantic-release.outputs.bump_type != 'none'
+    permissions:
+      contents: write  # Required for release creation
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-    
-    - name: Find project file (Windows)
-      id: find_project_win
-      run: |
-        # Find .csproj file
-        $PROJECT_FILE = Get-ChildItem -Recurse -Filter "*.csproj" | Select-Object -First 1 -ExpandProperty FullName
-        if (-not $PROJECT_FILE) {
-          Write-Error "No .csproj file found!"
-          exit 1
-        }
-        Write-Host "project_file=$PROJECT_FILE"
-        echo "project_file=$PROJECT_FILE" >> $env:GITHUB_OUTPUT
-        echo "project_dir=$(Split-Path -Path $PROJECT_FILE -Parent)" >> $env:GITHUB_OUTPUT
     
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
@@ -118,69 +95,62 @@ jobs:
         
         $NEW_VERSION = "$($PARTS[0]).$($PARTS[1]).$($PARTS[2])"
         echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
-        Write-Host "New version: $NEW_VERSION ($BUMP bump)"
+        Write-Host "New version: $NEW_VERSION"
     
-    - name: Update project version
+    - name: Update version in csproj
       run: |
-        $PROJECT_FILE="${{ steps.find_project_win.outputs.project_file }}"
-        $VERSION="${{ steps.calc_version.outputs.new_version }}"
+        # Find csproj file
+        $PROJECT = Get-ChildItem -Recurse -Filter "*.csproj" | Select-Object -First 1
+        if (-not $PROJECT) {
+          Write-Error "No .csproj file found!"
+          exit 1
+        }
         
-        Write-Host "Updating $PROJECT_FILE to version $VERSION"
+        $CONTENT = Get-Content $PROJECT.FullName -Raw
+        $VERSION = "${{ steps.calc_version.outputs.new_version }}"
         
-        $CONTENT = Get-Content $PROJECT_FILE -Raw
-        
-        # Update Version tag
+        # Update all version tags
         $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
-        # Update AssemblyVersion tag  
         $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>"
-        # Update FileVersion tag
         $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>"
         
-        Set-Content -Path $PROJECT_FILE -Value $CONTENT
+        Set-Content -Path $PROJECT.FullName -Value $CONTENT
         
-        # Verify
-        Write-Host "Updated content:"
-        Select-String -Path $PROJECT_FILE -Pattern "Version"
-    
-    - name: Build
+    - name: Build and publish
       run: |
-        $PROJECT_DIR="${{ steps.find_project_win.outputs.project_dir }}"
-        cd "$PROJECT_DIR"
+        # Build
         dotnet build -c Release
-    
-    - name: Publish single file
-      run: |
-        $PROJECT_DIR="${{ steps.find_project_win.outputs.project_dir }}"
-        cd "$PROJECT_DIR"
+        
+        # Publish single file
         dotnet publish -c Release `
           -r win-x64 `
           --self-contained false `
           -p:PublishSingleFile=true `
           -p:DebugType=None `
+          -p:DebugSymbols=false `
           -o ./publish
+        
+        # Verify file exists
+        if (Test-Path "./publish/DiscordAudioGuardTray.exe") {
+          Write-Host "✅ Executable created successfully"
+        } else {
+          Write-Error "❌ Executable not found!"
+          Get-ChildItem ./publish -Recurse
+          exit 1
+        }
     
-    - name: Create Release
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: v${{ steps.calc_version.outputs.new_version }}
-        name: Discord Audio Guard v${{ steps.calc_version.outputs.new_version }}
+        name: Release v${{ steps.calc_version.outputs.new_version }}
         body: |
-          ## v${{ steps.calc_version.outputs.new_version }}
+          Automated semantic release
           
-          **Automatic semantic release**
+          Version: v${{ steps.calc_version.outputs.new_version }}
           
-          ### Changes Since Last Release:
-          ${{ needs.semantic-release.outputs.new_version_calc }}
-          
-          ### Download
-          Single executable file ready to use.
-          
-          ### Usage
-          1. Run `DiscordAudioGuardTray.exe`
-          2. Configure devices in system tray settings
-          3. Discord audio will be muted on unselected devices
-        draft: false
+          Download the executable below and run it.
         files: |
-          ${{ steps.find_project_win.outputs.project_dir }}/publish/DiscordAudioGuardTray.exe
+          ./publish/DiscordAudioGuardTray.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
