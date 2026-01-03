@@ -18,35 +18,40 @@ jobs:
         fetch-depth: 0
         fetch-tags: true
     
+    - name: Find project file
+      id: find_project
+      run: |
+        # Find .csproj file in repository
+        PROJECT_FILE=$(find . -name "*.csproj" -type f | head -1)
+        if [ -z "$PROJECT_FILE" ]; then
+          echo "No .csproj file found!"
+          exit 1
+        fi
+        echo "project_file=$PROJECT_FILE" >> $GITHUB_OUTPUT
+        echo "Found project file: $PROJECT_FILE"
+    
     - name: Get last tag
       id: get_last_tag
       run: |
-        # Get latest tag or start from v0.0.0
         LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
         echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
         echo "Last tag: $LAST_TAG"
     
-    - name: Analyze commits since last tag
+    - name: Analyze commits
       id: analyze_commits
       run: |
         LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
         
-        # Get commits since last tag
         if [ "$LAST_TAG" = "v0.0.0" ]; then
           COMMITS=$(git log --oneline --format=%s)
         else
           COMMITS=$(git log "$LAST_TAG..HEAD" --oneline --format=%s)
         fi
         
-        echo "Commits since $LAST_TAG:"
-        echo "$COMMITS"
-        
-        # Count commit types
         MAJOR_COUNT=$(echo "$COMMITS" | grep -i "BREAKING CHANGE\|!" | wc -l)
-        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature" | wc -l)
-        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix\|^bug" | wc -l)
+        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature\|^feat(\|^feat:" | wc -l)
+        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix\|^fix(\|^fix:" | wc -l)
         
-        # Determine bump type
         if [ $MAJOR_COUNT -gt 0 ]; then
           BUMP="major"
         elif [ $FEAT_COUNT -gt 0 ]; then
@@ -57,45 +62,8 @@ jobs:
           BUMP="none"
         fi
         
-        echo "major_count=$MAJOR_COUNT" >> $GITHUB_OUTPUT
-        echo "feat_count=$FEAT_COUNT" >> $GITHUB_OUTPUT
-        echo "fix_count=$FIX_COUNT" >> $GITHUB_OUTPUT
         echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
-    
-    - name: Calculate new version
-      id: calc_version
-      run: |
-        LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
-        BUMP="${{ steps.analyze_commits.outputs.bump_type }}"
-        
-        # Remove 'v' prefix and split version
-        VERSION="${LAST_TAG#v}"
-        IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-        
-        # Increment based on bump type
-        case "$BUMP" in
-          "major")
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-            ;;
-          "minor")
-            MINOR=$((MINOR + 1))
-            PATCH=0
-            ;;
-          "patch")
-            PATCH=$((PATCH + 1))
-            ;;
-          "none")
-            echo "No version bump needed"
-            exit 0
-            ;;
-        esac
-        
-        NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-        echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
-        echo "New version: $NEW_VERSION ($BUMP bump)"
+        echo "new_version_calc=$MAJOR_COUNT.$FEAT_COUNT.$FIX_COUNT" >> $GITHUB_OUTPUT
 
   build:
     runs-on: windows-latest
@@ -106,27 +74,84 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
+    - name: Find project file (Windows)
+      id: find_project_win
+      run: |
+        # Find .csproj file
+        $PROJECT_FILE = Get-ChildItem -Recurse -Filter "*.csproj" | Select-Object -First 1 -ExpandProperty FullName
+        if (-not $PROJECT_FILE) {
+          Write-Error "No .csproj file found!"
+          exit 1
+        }
+        Write-Host "project_file=$PROJECT_FILE"
+        echo "project_file=$PROJECT_FILE" >> $env:GITHUB_OUTPUT
+        echo "project_dir=$(Split-Path -Path $PROJECT_FILE -Parent)" >> $env:GITHUB_OUTPUT
+    
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '10.0.x'
     
+    - name: Calculate new version
+      id: calc_version
+      run: |
+        $LAST_TAG="${{ needs.semantic-release.outputs.last_tag }}"
+        $BUMP="${{ needs.semantic-release.outputs.bump_type }}"
+        
+        $VERSION = $LAST_TAG -replace '^v', ''
+        $PARTS = $VERSION -split '\.'
+        
+        switch ($BUMP) {
+          "major" { 
+            $PARTS[0] = [int]$PARTS[0] + 1
+            $PARTS[1] = 0
+            $PARTS[2] = 0
+          }
+          "minor" { 
+            $PARTS[1] = [int]$PARTS[1] + 1
+            $PARTS[2] = 0
+          }
+          "patch" { 
+            $PARTS[2] = [int]$PARTS[2] + 1
+          }
+        }
+        
+        $NEW_VERSION = "$($PARTS[0]).$($PARTS[1]).$($PARTS[2])"
+        echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
+        Write-Host "New version: $NEW_VERSION ($BUMP bump)"
+    
     - name: Update project version
       run: |
-        $VERSION="${{ needs.semantic-release.outputs.new_version }}"
-        $PROJECT="DiscordAudioGuardTray.csproj"
+        $PROJECT_FILE="${{ steps.find_project_win.outputs.project_file }}"
+        $VERSION="${{ steps.calc_version.outputs.new_version }}"
         
-        (Get-Content $PROJECT) -replace '<Version>.*</Version>', "<Version>$VERSION</Version>" | Set-Content $PROJECT
-        (Get-Content $PROJECT) -replace '<AssemblyVersion>.*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>" | Set-Content $PROJECT
-        (Get-Content $PROJECT) -replace '<FileVersion>.*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>" | Set-Content $PROJECT
+        Write-Host "Updating $PROJECT_FILE to version $VERSION"
         
-        echo "Updated to version $VERSION"
+        $CONTENT = Get-Content $PROJECT_FILE -Raw
+        
+        # Update Version tag
+        $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
+        # Update AssemblyVersion tag  
+        $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>"
+        # Update FileVersion tag
+        $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>"
+        
+        Set-Content -Path $PROJECT_FILE -Value $CONTENT
+        
+        # Verify
+        Write-Host "Updated content:"
+        Select-String -Path $PROJECT_FILE -Pattern "Version"
     
     - name: Build
-      run: dotnet build -c Release
+      run: |
+        $PROJECT_DIR="${{ steps.find_project_win.outputs.project_dir }}"
+        cd "$PROJECT_DIR"
+        dotnet build -c Release
     
     - name: Publish single file
       run: |
+        $PROJECT_DIR="${{ steps.find_project_win.outputs.project_dir }}"
+        cd "$PROJECT_DIR"
         dotnet publish -c Release `
           -r win-x64 `
           --self-contained false `
@@ -137,28 +162,25 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v${{ needs.semantic-release.outputs.new_version }}
-        name: Discord Audio Guard v${{ needs.semantic-release.outputs.new_version }}
+        tag_name: v${{ steps.calc_version.outputs.new_version }}
+        name: Discord Audio Guard v${{ steps.calc_version.outputs.new_version }}
         body: |
-          ## v${{ needs.semantic-release.outputs.new_version }}
+          ## v${{ steps.calc_version.outputs.new_version }}
           
-          ### Version Bump: ${{ needs.semantic-release.outputs.bump_type }}
+          **Automatic semantic release**
           
-          **Commit Analysis:**
-          - Breaking changes: ${{ needs.semantic-release.outputs.major_count }}
-          - Features: ${{ needs.semantic-release.outputs.feat_count }}
-          - Fixes: ${{ needs.semantic-release.outputs.fix_count }}
+          ### Changes Since Last Release:
+          ${{ needs.semantic-release.outputs.new_version_calc }}
           
-          ### What's Included
-          - Single executable file
-          - Ready-to-use application
+          ### Download
+          Single executable file ready to use.
           
-          ### How to Use
-          1. Download `DiscordAudioGuardTray.exe`
-          2. Run it (appears in system tray)
-          3. Right-click tray icon → Settings
-          4. Configure your audio devices
+          ### Usage
+          1. Run `DiscordAudioGuardTray.exe`
+          2. Configure devices in system tray settings
+          3. Discord audio will be muted on unselected devices
+        draft: false
         files: |
-          ./publish/DiscordAudioGuardTray.exe
+          ${{ steps.find_project_win.outputs.project_dir }}/publish/DiscordAudioGuardTray.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
