@@ -21,25 +21,40 @@ jobs:
     - name: Get last tag
       id: get_last_tag
       run: |
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        # Get the latest semantic version tag, or start from v0.0.0
+        LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+        if [ -z "$LAST_TAG" ]; then
+          LAST_TAG="v0.0.0"
+        fi
         echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
         echo "Last tag: $LAST_TAG"
     
-    - name: Analyze commits
+    - name: Analyze commits since last tag
       id: analyze_commits
       run: |
         LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
+        echo "Analyzing commits since: $LAST_TAG"
         
+        # Get commit messages since last tag
         if [ "$LAST_TAG" = "v0.0.0" ]; then
           COMMITS=$(git log --oneline --format=%s)
         else
           COMMITS=$(git log "$LAST_TAG..HEAD" --oneline --format=%s)
         fi
         
-        MAJOR_COUNT=$(echo "$COMMITS" | grep -i "BREAKING CHANGE\|!" | wc -l)
-        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature" | wc -l)
-        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix" | wc -l)
+        echo "Commits found:"
+        echo "$COMMITS"
         
+        # Count commit types (case insensitive, with optional scope)
+        MAJOR_COUNT=$(echo "$COMMITS" | grep -E -i "BREAKING CHANGE|^.*!:|^feat\(.*\)!:" | wc -l)
+        FEAT_COUNT=$(echo "$COMMITS" | grep -E -i "^feat|^feature" | wc -l)
+        FIX_COUNT=$(echo "$COMMITS" | grep -E -i "^fix|^bug" | wc -l)
+        
+        echo "Major changes: $MAJOR_COUNT"
+        echo "Features: $FEAT_COUNT"
+        echo "Fixes: $FIX_COUNT"
+        
+        # Determine bump type
         if [ $MAJOR_COUNT -gt 0 ]; then
           BUMP="major"
         elif [ $FEAT_COUNT -gt 0 ]; then
@@ -51,6 +66,7 @@ jobs:
         fi
         
         echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
+        echo "Version bump: $BUMP"
 
   build:
     runs-on: windows-latest
@@ -66,7 +82,6 @@ jobs:
     - name: Get project name
       id: project_name
       run: |
-        # Get csproj filename without extension
         $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
         $PROJECT_NAME = [System.IO.Path]::GetFileNameWithoutExtension($PROJECT.Name)
         echo "project_name=$PROJECT_NAME" >> $env:GITHUB_OUTPUT
@@ -80,49 +95,78 @@ jobs:
     - name: Calculate new version
       id: calc_version
       run: |
-        $LAST_TAG="${{ needs.semantic-release.outputs.last_tag }}"
-        $BUMP="${{ needs.semantic-release.outputs.bump_type }}"
+        $LAST_TAG = "${{ needs.semantic-release.outputs.last_tag }}"
+        $BUMP = "${{ needs.semantic-release.outputs.bump_type }}"
         
-        $VERSION = $LAST_TAG -replace '^v', ''
-        $PARTS = $VERSION -split '\.'
+        Write-Host "Last tag: $LAST_TAG"
+        Write-Host "Bump type: $BUMP"
         
+        # Extract version numbers (remove 'v' prefix)
+        $VERSION_NUMBERS = $LAST_TAG -replace '^v', ''
+        Write-Host "Version numbers: $VERSION_NUMBERS"
+        
+        # Split into major.minor.patch
+        $PARTS = $VERSION_NUMBERS -split '\.'
+        
+        # Ensure we have exactly 3 parts
+        if ($PARTS.Count -lt 3) {
+          $PARTS = @(0, 0, 0)
+        }
+        
+        # Convert to integers
+        $MAJOR = [int]$PARTS[0]
+        $MINOR = [int]$PARTS[1]
+        $PATCH = [int]$PARTS[2]
+        
+        # Apply bump
         switch ($BUMP) {
           "major" { 
-            $PARTS[0] = [int]$PARTS[0] + 1
-            $PARTS[1] = 0
-            $PARTS[2] = 0
+            $MAJOR++
+            $MINOR = 0
+            $PATCH = 0
           }
           "minor" { 
-            $PARTS[1] = [int]$PARTS[1] + 1
-            $PARTS[2] = 0
+            $MINOR++
+            $PATCH = 0
           }
           "patch" { 
-            $PARTS[2] = [int]$PARTS[2] + 1
+            $PATCH++
           }
         }
         
-        $NEW_VERSION = "$($PARTS[0]).$($PARTS[1]).$($PARTS[2])"
-        echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
+        $NEW_VERSION = "$MAJOR.$MINOR.$PATCH"
         Write-Host "New version: $NEW_VERSION"
+        
+        # Set outputs
+        echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
+        echo "tag=v$NEW_VERSION" >> $env:GITHUB_OUTPUT
     
     - name: Update version in csproj
       run: |
         $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
         $VERSION = "${{ steps.calc_version.outputs.new_version }}"
         
-        $CONTENT = Get-Content $PROJECT.FullName -Raw
-        $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
-        $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>"
-        $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>"
+        Write-Host "Updating $($PROJECT.Name) to version $VERSION"
         
-        Set-Content -Path $PROJECT.FullName -Value $CONTENT
+        $CONTENT = Get-Content $PROJECT.FullName -Raw
+        
+        # Update all version tags
+        $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
+        $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION</AssemblyVersion>"
+        $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION</FileVersion>"
+        
+        Set-Content -Path $PROJECT.FullName -Value $CONTENT -Encoding UTF8
+        
+        # Verify update
+        Write-Host "Updated version:"
+        Select-String -Path $PROJECT.FullName -Pattern "Version"
     
     - name: Build and publish
       run: |
-        # Build
+        Write-Host "Building project..."
         dotnet build -c Release
         
-        # Publish single file
+        Write-Host "Publishing single executable..."
         dotnet publish -c Release `
           -r win-x64 `
           --self-contained false `
@@ -131,30 +175,66 @@ jobs:
           -p:DebugSymbols=false `
           -o ./publish
         
-        # Check what was created
+        # List files for debugging
         Write-Host "Files in publish directory:"
-        Get-ChildItem ./publish -Recurse | ForEach-Object { Write-Host "  $($_.Name)" }
+        Get-ChildItem ./publish | ForEach-Object { 
+          Write-Host "  - $($_.Name) ($($_.Length) bytes)" 
+        }
         
-        # Verify executable exists
+        # Verify executable
         $EXE_NAME = "${{ steps.project_name.outputs.project_name }}.exe"
-        if (Test-Path "./publish/$EXE_NAME") {
-          Write-Host "✅ Executable '$EXE_NAME' created successfully"
+        $EXE_PATH = "./publish/$EXE_NAME"
+        if (Test-Path $EXE_PATH) {
+          $FILE_INFO = Get-Item $EXE_PATH
+          Write-Host "✅ Executable created: $EXE_NAME ($($FILE_INFO.Length) bytes)"
         } else {
-          Write-Error "❌ Executable '$EXE_NAME' not found!"
+          Write-Error "❌ Executable not found at: $EXE_PATH"
           exit 1
         }
+    
+    - name: Create and push Git tag
+      run: |
+        $TAG = "${{ steps.calc_version.outputs.tag }}"
+        $VERSION = "${{ steps.calc_version.outputs.new_version }}"
+        
+        Write-Host "Creating tag: $TAG"
+        
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Create annotated tag
+        git tag -a $TAG -m "Release $TAG"
+        
+        # Push tag to remote
+        git push origin $TAG
+        
+        Write-Host "Tag $TAG created and pushed"
     
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v${{ steps.calc_version.outputs.new_version }}
-        name: Release v${{ steps.calc_version.outputs.new_version }}
+        tag_name: ${{ steps.calc_version.outputs.tag }}
+        name: Release ${{ steps.calc_version.outputs.tag }}
         body: |
-          Automated semantic release
+          # Discord Audio Guard ${{ steps.calc_version.outputs.new_version }}
           
-          Version: v${{ steps.calc_version.outputs.new_version }}
+          Automated release based on semantic commit messages.
           
-          Download the executable below and run it.
+          ## Changes
+          - **Major changes**: ${{ needs.semantic-release.outputs.major_count || 0 }}
+          - **Features**: ${{ needs.semantic-release.outputs.feat_count || 0 }}
+          - **Fixes**: ${{ needs.semantic-release.outputs.fix_count || 0 }}
+          
+          ## Usage
+          1. Download the executable
+          2. Run it (appears in system tray)
+          3. Right-click tray icon → Settings
+          4. Configure which devices to mute Discord on
+          
+          *Fixes Discord Go Live echo when streaming entire screen.*
+        draft: false
+        prerelease: false
         files: |
           ./publish/${{ steps.project_name.outputs.project_name }}.exe
       env:
