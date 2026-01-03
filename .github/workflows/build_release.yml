@@ -21,7 +21,7 @@ jobs:
     - name: Get last tag
       id: get_last_tag
       run: |
-        # Get the latest semantic version tag, or start from v0.0.0
+        # Get the latest semantic version tag
         LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
         if [ -z "$LAST_TAG" ]; then
           LAST_TAG="v0.0.0"
@@ -42,11 +42,10 @@ jobs:
           COMMITS=$(git log "$LAST_TAG..HEAD" --oneline --format=%s)
         fi
         
-        echo "Commits found:"
-        echo "$COMMITS"
+        echo "Found $(echo "$COMMITS" | wc -l) commits since last tag"
         
-        # Count commit types (case insensitive, with optional scope)
-        MAJOR_COUNT=$(echo "$COMMITS" | grep -E -i "BREAKING CHANGE|^.*!:|^feat\(.*\)!:" | wc -l)
+        # Count commit types
+        MAJOR_COUNT=$(echo "$COMMITS" | grep -E -i "BREAKING CHANGE|^.*!:" | wc -l)
         FEAT_COUNT=$(echo "$COMMITS" | grep -E -i "^feat|^feature" | wc -l)
         FIX_COUNT=$(echo "$COMMITS" | grep -E -i "^fix|^bug" | wc -l)
         
@@ -66,7 +65,7 @@ jobs:
         fi
         
         echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
-        echo "Version bump: $BUMP"
+        echo "Version bump needed: $BUMP"
 
   build:
     runs-on: windows-latest
@@ -101,17 +100,9 @@ jobs:
         Write-Host "Last tag: $LAST_TAG"
         Write-Host "Bump type: $BUMP"
         
-        # Extract version numbers (remove 'v' prefix)
+        # Extract version numbers
         $VERSION_NUMBERS = $LAST_TAG -replace '^v', ''
-        Write-Host "Version numbers: $VERSION_NUMBERS"
-        
-        # Split into major.minor.patch
         $PARTS = $VERSION_NUMBERS -split '\.'
-        
-        # Ensure we have exactly 3 parts
-        if ($PARTS.Count -lt 3) {
-          $PARTS = @(0, 0, 0)
-        }
         
         # Convert to integers
         $MAJOR = [int]$PARTS[0]
@@ -135,13 +126,33 @@ jobs:
         }
         
         $NEW_VERSION = "$MAJOR.$MINOR.$PATCH"
+        $TAG = "v$NEW_VERSION"
+        
         Write-Host "New version: $NEW_VERSION"
+        Write-Host "New tag: $TAG"
         
         # Set outputs
         echo "new_version=$NEW_VERSION" >> $env:GITHUB_OUTPUT
-        echo "tag=v$NEW_VERSION" >> $env:GITHUB_OUTPUT
+        echo "tag=$TAG" >> $env:GITHUB_OUTPUT
+    
+    - name: Check if tag already exists
+      id: check_tag
+      run: |
+        $TAG = "${{ steps.calc_version.outputs.tag }}"
+        Write-Host "Checking if tag exists: $TAG"
+        
+        # Check local tags
+        $LOCAL_TAG = git tag -l $TAG
+        if ($LOCAL_TAG) {
+          Write-Host "Tag $TAG already exists locally"
+          echo "tag_exists=true" >> $env:GITHUB_OUTPUT
+        } else {
+          Write-Host "Tag $TAG does not exist locally"
+          echo "tag_exists=false" >> $env:GITHUB_OUTPUT
+        }
     
     - name: Update version in csproj
+      if: steps.check_tag.outputs.tag_exists == 'false'
       run: |
         $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
         $VERSION = "${{ steps.calc_version.outputs.new_version }}"
@@ -149,24 +160,17 @@ jobs:
         Write-Host "Updating $($PROJECT.Name) to version $VERSION"
         
         $CONTENT = Get-Content $PROJECT.FullName -Raw
-        
-        # Update all version tags
         $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
         $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION</AssemblyVersion>"
         $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION</FileVersion>"
         
         Set-Content -Path $PROJECT.FullName -Value $CONTENT -Encoding UTF8
-        
-        # Verify update
-        Write-Host "Updated version:"
-        Select-String -Path $PROJECT.FullName -Pattern "Version"
     
     - name: Build and publish
+      if: steps.check_tag.outputs.tag_exists == 'false'
       run: |
-        Write-Host "Building project..."
         dotnet build -c Release
         
-        Write-Host "Publishing single executable..."
         dotnet publish -c Release `
           -r win-x64 `
           --self-contained false `
@@ -175,43 +179,38 @@ jobs:
           -p:DebugSymbols=false `
           -o ./publish
         
-        # List files for debugging
-        Write-Host "Files in publish directory:"
-        Get-ChildItem ./publish | ForEach-Object { 
-          Write-Host "  - $($_.Name) ($($_.Length) bytes)" 
-        }
-        
-        # Verify executable
         $EXE_NAME = "${{ steps.project_name.outputs.project_name }}.exe"
         $EXE_PATH = "./publish/$EXE_NAME"
         if (Test-Path $EXE_PATH) {
-          $FILE_INFO = Get-Item $EXE_PATH
-          Write-Host "✅ Executable created: $EXE_NAME ($($FILE_INFO.Length) bytes)"
+          Write-Host "✅ Executable created: $EXE_NAME"
         } else {
-          Write-Error "❌ Executable not found at: $EXE_PATH"
+          Write-Error "❌ Executable not found"
           exit 1
         }
     
     - name: Create and push Git tag
+      if: steps.check_tag.outputs.tag_exists == 'false'
       run: |
         $TAG = "${{ steps.calc_version.outputs.tag }}"
-        $VERSION = "${{ steps.calc_version.outputs.new_version }}"
         
         Write-Host "Creating tag: $TAG"
         
-        # Configure git
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        
-        # Create annotated tag
         git tag -a $TAG -m "Release $TAG"
-        
-        # Push tag to remote
         git push origin $TAG
         
-        Write-Host "Tag $TAG created and pushed"
+        Write-Host "✅ Tag $TAG created and pushed"
+    
+    - name: Skip existing tag
+      if: steps.check_tag.outputs.tag_exists == 'true'
+      run: |
+        $TAG = "${{ steps.calc_version.outputs.tag }}"
+        Write-Host "⚠️  Tag $TAG already exists. Skipping release creation."
+        Write-Host "This usually means the commits don't require a new version bump."
     
     - name: Create GitHub Release
+      if: steps.check_tag.outputs.tag_exists == 'false'
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.calc_version.outputs.tag }}
@@ -219,22 +218,20 @@ jobs:
         body: |
           # Discord Audio Guard ${{ steps.calc_version.outputs.new_version }}
           
-          Automated release based on semantic commit messages.
+          Automated semantic release.
           
-          ## Changes
-          - **Major changes**: ${{ needs.semantic-release.outputs.major_count || 0 }}
+          ## What's New
+          - **Breaking changes**: ${{ needs.semantic-release.outputs.major_count || 0 }}
           - **Features**: ${{ needs.semantic-release.outputs.feat_count || 0 }}
           - **Fixes**: ${{ needs.semantic-release.outputs.fix_count || 0 }}
           
-          ## Usage
-          1. Download the executable
-          2. Run it (appears in system tray)
-          3. Right-click tray icon → Settings
-          4. Configure which devices to mute Discord on
+          ## Installation
+          1. Download `${{ steps.project_name.outputs.project_name }}.exe`
+          2. Run the executable
+          3. Configure audio devices in system tray settings
           
           *Fixes Discord Go Live echo when streaming entire screen.*
         draft: false
-        prerelease: false
         files: |
           ./publish/${{ steps.project_name.outputs.project_name }}.exe
       env:
