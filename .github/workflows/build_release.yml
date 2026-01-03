@@ -1,0 +1,164 @@
+name: Semantic Release
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  semantic-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+    
+    - name: Get last tag
+      id: get_last_tag
+      run: |
+        # Get latest tag or start from v0.0.0
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+        echo "Last tag: $LAST_TAG"
+    
+    - name: Analyze commits since last tag
+      id: analyze_commits
+      run: |
+        LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
+        
+        # Get commits since last tag
+        if [ "$LAST_TAG" = "v0.0.0" ]; then
+          COMMITS=$(git log --oneline --format=%s)
+        else
+          COMMITS=$(git log "$LAST_TAG..HEAD" --oneline --format=%s)
+        fi
+        
+        echo "Commits since $LAST_TAG:"
+        echo "$COMMITS"
+        
+        # Count commit types
+        MAJOR_COUNT=$(echo "$COMMITS" | grep -i "BREAKING CHANGE\|!" | wc -l)
+        FEAT_COUNT=$(echo "$COMMITS" | grep -i "^feat\|^feature" | wc -l)
+        FIX_COUNT=$(echo "$COMMITS" | grep -i "^fix\|^bugfix\|^bug" | wc -l)
+        
+        # Determine bump type
+        if [ $MAJOR_COUNT -gt 0 ]; then
+          BUMP="major"
+        elif [ $FEAT_COUNT -gt 0 ]; then
+          BUMP="minor"
+        elif [ $FIX_COUNT -gt 0 ]; then
+          BUMP="patch"
+        else
+          BUMP="none"
+        fi
+        
+        echo "major_count=$MAJOR_COUNT" >> $GITHUB_OUTPUT
+        echo "feat_count=$FEAT_COUNT" >> $GITHUB_OUTPUT
+        echo "fix_count=$FIX_COUNT" >> $GITHUB_OUTPUT
+        echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
+    
+    - name: Calculate new version
+      id: calc_version
+      run: |
+        LAST_TAG="${{ steps.get_last_tag.outputs.last_tag }}"
+        BUMP="${{ steps.analyze_commits.outputs.bump_type }}"
+        
+        # Remove 'v' prefix and split version
+        VERSION="${LAST_TAG#v}"
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+        
+        # Increment based on bump type
+        case "$BUMP" in
+          "major")
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            ;;
+          "minor")
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            ;;
+          "patch")
+            PATCH=$((PATCH + 1))
+            ;;
+          "none")
+            echo "No version bump needed"
+            exit 0
+            ;;
+        esac
+        
+        NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "New version: $NEW_VERSION ($BUMP bump)"
+
+  build:
+    runs-on: windows-latest
+    needs: semantic-release
+    if: needs.semantic-release.outputs.bump_type != 'none'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+    
+    - name: Update project version
+      run: |
+        $VERSION="${{ needs.semantic-release.outputs.new_version }}"
+        $PROJECT="DiscordAudioGuardTray.csproj"
+        
+        (Get-Content $PROJECT) -replace '<Version>.*</Version>', "<Version>$VERSION</Version>" | Set-Content $PROJECT
+        (Get-Content $PROJECT) -replace '<AssemblyVersion>.*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>" | Set-Content $PROJECT
+        (Get-Content $PROJECT) -replace '<FileVersion>.*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>" | Set-Content $PROJECT
+        
+        echo "Updated to version $VERSION"
+    
+    - name: Build
+      run: dotnet build -c Release
+    
+    - name: Publish single file
+      run: |
+        dotnet publish -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -p:PublishSingleFile=true `
+          -p:DebugType=None `
+          -o ./publish
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ needs.semantic-release.outputs.new_version }}
+        name: Discord Audio Guard v${{ needs.semantic-release.outputs.new_version }}
+        body: |
+          ## v${{ needs.semantic-release.outputs.new_version }}
+          
+          ### Version Bump: ${{ needs.semantic-release.outputs.bump_type }}
+          
+          **Commit Analysis:**
+          - Breaking changes: ${{ needs.semantic-release.outputs.major_count }}
+          - Features: ${{ needs.semantic-release.outputs.feat_count }}
+          - Fixes: ${{ needs.semantic-release.outputs.fix_count }}
+          
+          ### What's Included
+          - Single executable file
+          - Ready-to-use application
+          
+          ### How to Use
+          1. Download `DiscordAudioGuardTray.exe`
+          2. Run it (appears in system tray)
+          3. Right-click tray icon → Settings
+          4. Configure your audio devices
+        files: |
+          ./publish/DiscordAudioGuardTray.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
