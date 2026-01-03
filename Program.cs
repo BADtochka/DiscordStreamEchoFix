@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
-namespace DiscordAudioGuardTray
+namespace DiscordStreamEchoFix
 {
     internal static class Program
     {

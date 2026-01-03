@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using NAudio.CoreAudioApi;
 
-namespace DiscordAudioGuardTray.Config
+namespace DiscordStreamEchoFix.Config
 {
     public static class ConfigManager
     {

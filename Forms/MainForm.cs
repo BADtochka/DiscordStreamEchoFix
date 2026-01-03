@@ -1,5 +1,5 @@
-using DiscordAudioGuardTray.Config;
-using DiscordAudioGuardTray.Forms;
+using DiscordStreamEchoFix.Config;
+using DiscordStreamEchoFix.Forms;
 using NAudio.CoreAudioApi;
 using System;
 using System.Diagnostics;
@@ -8,7 +8,7 @@ using System.IO;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace DiscordAudioGuardTray
+namespace DiscordStreamEchoFix
 {
     public class MainForm : Form
     {

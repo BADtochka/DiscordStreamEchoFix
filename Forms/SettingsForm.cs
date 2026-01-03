@@ -1,4 +1,4 @@
-using DiscordAudioGuardTray.Config;
+using DiscordStreamEchoFix.Config;
 using NAudio.CoreAudioApi;
 using System;
 using System.Collections.Generic;
@@ -6,7 +6,7 @@ using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 
-namespace DiscordAudioGuardTray.Forms
+namespace DiscordStreamEchoFix.Forms
 {
     public class SettingsForm : Form
     {
