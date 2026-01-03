@@ -1,4 +1,4 @@
-# Discord Audio Guard
+# Discord Stream Echo/Double audio Fix
 
 Fixes Discord Go Live echo caused when Discord injects audio into all devices. This only occurs when streaming your entire screen, not when streaming a specific application.
 
