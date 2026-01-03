@@ -9,7 +9,7 @@ jobs:
   semantic-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # This is required for releases
+      contents: write
     
     steps:
     - name: Checkout
@@ -51,18 +51,26 @@ jobs:
         fi
         
         echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
-        echo "Detected $MAJOR_COUNT breaking, $FEAT_COUNT features, $FIX_COUNT fixes"
 
   build:
     runs-on: windows-latest
     needs: semantic-release
     if: needs.semantic-release.outputs.bump_type != 'none'
     permissions:
-      contents: write  # Required for release creation
+      contents: write
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+    
+    - name: Get project name
+      id: project_name
+      run: |
+        # Get csproj filename without extension
+        $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
+        $PROJECT_NAME = [System.IO.Path]::GetFileNameWithoutExtension($PROJECT.Name)
+        echo "project_name=$PROJECT_NAME" >> $env:GITHUB_OUTPUT
+        Write-Host "Project name: $PROJECT_NAME"
     
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
@@ -99,23 +107,16 @@ jobs:
     
     - name: Update version in csproj
       run: |
-        # Find csproj file
-        $PROJECT = Get-ChildItem -Recurse -Filter "*.csproj" | Select-Object -First 1
-        if (-not $PROJECT) {
-          Write-Error "No .csproj file found!"
-          exit 1
-        }
-        
-        $CONTENT = Get-Content $PROJECT.FullName -Raw
+        $PROJECT = Get-ChildItem -Filter "*.csproj" | Select-Object -First 1
         $VERSION = "${{ steps.calc_version.outputs.new_version }}"
         
-        # Update all version tags
+        $CONTENT = Get-Content $PROJECT.FullName -Raw
         $CONTENT = $CONTENT -replace '<Version>[^<]*</Version>', "<Version>$VERSION</Version>"
         $CONTENT = $CONTENT -replace '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$VERSION.0</AssemblyVersion>"
         $CONTENT = $CONTENT -replace '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$VERSION.0</FileVersion>"
         
         Set-Content -Path $PROJECT.FullName -Value $CONTENT
-        
+    
     - name: Build and publish
       run: |
         # Build
@@ -130,12 +131,16 @@ jobs:
           -p:DebugSymbols=false `
           -o ./publish
         
-        # Verify file exists
-        if (Test-Path "./publish/DiscordAudioGuardTray.exe") {
-          Write-Host "✅ Executable created successfully"
+        # Check what was created
+        Write-Host "Files in publish directory:"
+        Get-ChildItem ./publish -Recurse | ForEach-Object { Write-Host "  $($_.Name)" }
+        
+        # Verify executable exists
+        $EXE_NAME = "${{ steps.project_name.outputs.project_name }}.exe"
+        if (Test-Path "./publish/$EXE_NAME") {
+          Write-Host "✅ Executable '$EXE_NAME' created successfully"
         } else {
-          Write-Error "❌ Executable not found!"
-          Get-ChildItem ./publish -Recurse
+          Write-Error "❌ Executable '$EXE_NAME' not found!"
           exit 1
         }
     
@@ -151,6 +156,6 @@ jobs:
           
           Download the executable below and run it.
         files: |
-          ./publish/DiscordAudioGuardTray.exe
+          ./publish/${{ steps.project_name.outputs.project_name }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
